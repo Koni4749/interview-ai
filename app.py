@@ -18,26 +18,32 @@ MODEL_ID = st.secrets.get("MODEL_NAME", "google/gemma-4-31B-it")
 
 client = OpenAI(api_key=api_key, base_url=base_url)
 
-# --- 대학별 평가표 데이터 로드 ---
+# --- 대학별 평가표 데이터 로드 (app.py 기준 절대 경로 사용) ---
 @st.cache_data
 def load_university_rubrics():
-    json_path = "universities.json"
-    if os.path.exists(json_path):
+    # app.py 파일이 위치한 실제 디렉토리 기준 절대 경로 생성
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    json_path = os.path.join(base_dir, "universities.json")
+    
+    if not os.path.exists(json_path):
+        st.error(f"⚠️ `universities.json` 파일을 찾을 수 없습니다. (탐색 경로: {json_path})")
+        return {}
+
+    try:
         with open(json_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {
-        "default": {
-            "interview_style": "서류 기반 진위 확인 면접",
-            "evaluation_factors": [
-                {"name": "학업역량", "ratio": "40%", "criteria": "교과 원리 이해 및 탐구력"},
-                {"name": "진로역량", "ratio": "40%", "criteria": "전공 적합성 및 주도성"},
-                {"name": "공동체역량", "ratio": "20%", "criteria": "협업 및 소통 능력"}
-            ]
-        }
-    }
+            data = json.load(f)
+            return data
+    except Exception as e:
+        st.error(f"⚠️ `universities.json` 파일을 읽는 중 오류가 발생했습니다: {e}")
+        return {}
 
 UNIV_DATA = load_university_rubrics()
-UNIV_CHOICES = [k for k in UNIV_DATA.keys() if k != "default"] + ["직접 입력"]
+# 'default' 제외하고 순수 대학명 리스트만 추출 ('직접 입력' 완전 제거)
+UNIV_CHOICES = [k for k in UNIV_DATA.keys() if k != "default"]
+
+if not UNIV_CHOICES:
+    st.error("선택 가능한 대학 목록이 없습니다. `universities.json` 파일의 내용을 확인해주세요.")
+    st.stop()
 
 # --- PDF 텍스트 추출 함수 ---
 def extract_text_from_pdf(file_bytes) -> str:
@@ -69,22 +75,17 @@ if "last_uploaded_file" not in st.session_state:
 with st.sidebar:
     st.header("⚙️ 모의면접 설정")
     
-    selected_univ = st.selectbox("지원 대학 선택", UNIV_CHOICES, index=0)
-    
-    if selected_univ == "직접 입력":
-        target_univ = st.text_input("대학명을 입력하세요", placeholder="예: 한국대학교")
-        current_rubric = UNIV_DATA.get("default")
-    else:
-        target_univ = selected_univ
-        current_rubric = UNIV_DATA.get(selected_univ, UNIV_DATA.get("default"))
+    # 순수 드롭다운 선택 (직접 입력 분기 제거)
+    target_univ = st.selectbox("지원 대학 선택", UNIV_CHOICES, index=0)
+    current_rubric = UNIV_DATA[target_univ]
 
     target_major = st.text_input("지원 학과", value="컴퓨터공학과")
     
     # 선택된 대학의 평가 기준 실시간 표시
     with st.expander(f"📌 {target_univ} 평가요소 확인"):
-        st.markdown(f"**면접 스타일:**\n{current_rubric['interview_style']}")
+        st.markdown(f"**면접 스타일:**\n{current_rubric.get('interview_style', '서류 기반 진위 확인 면접')}")
         st.markdown("**평가 배점:**")
-        for factor in current_rubric["evaluation_factors"]:
+        for factor in current_rubric.get("evaluation_factors", []):
             st.markdown(f"- **{factor['name']} ({factor['ratio']})**: {factor['criteria']}")
 
     st.divider()
@@ -103,13 +104,13 @@ with st.sidebar:
         student_record = st.text_area(
             "추출된 텍스트 확인/수정",
             value=st.session_state.parsed_record,
-            height=200,
+            height=220,
             placeholder="PDF 텍스트가 표시됩니다. 불필요한 인적사항 등은 지우셔도 됩니다."
         )
     else:
         student_record = st.text_area(
             "세특 및 탐구활동 직접 입력",
-            height=200,
+            height=220,
             placeholder="[정보] 알고리즘 원리를 탐구하고 직접 구현한 경험..."
         )
 
@@ -117,9 +118,7 @@ with st.sidebar:
     st.session_state.max_turns = st.slider("면접 질문 횟수 (턴)", min_value=2, max_value=6, value=3)
 
     if st.button("🚀 모의면접 시작", type="primary", use_container_width=True):
-        if not target_univ.strip():
-            st.error("지원 대학을 지정해주세요.")
-        elif not student_record.strip():
+        if not student_record.strip():
             st.error("생기부 내용을 입력하거나 PDF를 올려주세요.")
         else:
             st.session_state.active_record = student_record
@@ -132,7 +131,7 @@ with st.sidebar:
             st.session_state.evaluation_result = None
 
             # 평가 기준 텍스트화
-            rubric_str = "\n".join([f"- {f['name']} ({f['ratio']}): {f['criteria']}" for f in current_rubric["evaluation_factors"]])
+            rubric_str = "\n".join([f"- {f['name']} ({f['ratio']}): {f['criteria']}" for f in current_rubric.get("evaluation_factors", [])])
 
             # 첫 번째 질문 생성
             with st.spinner(f"{target_univ} 평가 기준을 바탕으로 첫 질문을 구성 중입니다..."):
@@ -140,7 +139,7 @@ with st.sidebar:
 당신은 {target_univ} {target_major} 학생부종합전형의 전문 입학사정관입니다.
 
 [대학별 면접 기조]
-{current_rubric['interview_style']}
+{current_rubric.get('interview_style', '')}
 
 [평가 핵심 요소]
 {rubric_str}
@@ -193,7 +192,7 @@ if st.session_state.interview_active:
                 rubric = st.session_state.current_rubric
                 followup_prompt = f"""
 당신은 {st.session_state.target_univ} {st.session_state.target_major} 입학사정관입니다.
-{st.session_state.target_univ}의 면접 기조: {rubric['interview_style']}
+{st.session_state.target_univ}의 면접 기조: {rubric.get('interview_style', '')}
 
 [생기부 내용]
 {st.session_state.active_record[:6000]}
@@ -228,7 +227,7 @@ if not st.session_state.interview_active and st.session_state.turn_count >= st.s
         with st.spinner(f"{st.session_state.target_univ} 공식 평가요소에 맞춰 채점표를 작성하고 있습니다..."):
             transcript = "\n".join([f"[{'면접관' if m['role']=='assistant' else '지원자'}]: {m['content']}" for m in st.session_state.messages])
             rubric = st.session_state.current_rubric
-            rubric_str = "\n".join([f"- {f['name']} ({f['ratio']}): {f['criteria']}" for f in rubric["evaluation_factors"]])
+            rubric_str = "\n".join([f"- {f['name']} ({f['ratio']}): {f['criteria']}" for f in rubric.get("evaluation_factors", [])])
 
             eval_prompt = f"""
 당신은 {st.session_state.target_univ} 학생부종합전형 수석 평가위원입니다.
@@ -245,7 +244,7 @@ if not st.session_state.interview_active and st.session_state.turn_count >= st.s
 {transcript}
 
 [작성 요구사항]
-1. 위 [대학 평가요소 및 배점 비율]에 명시된 항목별로 정확히 구분하여 점수 산출(예: 34 / 40점) 및 세부 평가 이유 작성
+1. 위 [대학 평가요소 및 배점 비율]에 명시된 항목별로 정확히 구분하여 점수 산출 및 세부 평가 이유 작성
 2. 종합 환산 총점 (100점 만점 기준)
 3. 💡 {st.session_state.target_univ} 입학사정관 기준 우수했던 점 2가지
 4. ⚠️ 실전 면접 대비 보완할 점 2가지
